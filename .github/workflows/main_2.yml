@@ -1,0 +1,71 @@
+name: YT Stream to MEGA Archiver
+
+on:
+  workflow_dispatch: # Pure manual trigger, no inputs needed
+
+env:
+  TARGET_URL: "https://www.youtube.com/@wushanghq/live"
+
+jobs:
+  archive-stream:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install Dependencies (yt-dlp, Deno, ffmpeg & MEGAcmd)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip unzip curl ffmpeg
+          
+          # Install yt-dlp via pip for the latest version
+          pip3 install -U yt-dlp
+          
+          # Install Deno (Required by yt-dlp for YouTube JS challenges)
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          
+          # Install MEGAcmd for CLI uploads
+          wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb
+          sudo apt install -y "$PWD/megacmd-xUbuntu_22.04_amd64.deb"
+
+      - name: Set up YouTube Cookies
+        run: |
+          echo "${{ secrets.YT_COOKIES }}" > cookies.txt
+
+      - name: Download Stream (with Auto-Timeout)
+        run: |
+          timeout --signal=SIGINT 340m yt-dlp \
+            --cookies cookies.txt \
+            --wait-for-video 60 \
+            --downloader m3u8:native \
+            -f "bestvideo+bestaudio/best" \
+            --write-thumbnail \
+            --embed-thumbnail \
+            --embed-metadata \
+            --force-ipv4 \
+            --remote-components ejs:github \
+            --extractor-args "youtube:player_client=tv,web" \
+            -o "2_%(title)s.%(ext)s" \
+            "$TARGET_URL" || true
+
+      - name: Upload to MEGA
+        env:
+          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
+          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+        run: |
+          # Generate today's date in readable format (e.g., 2 March 2026)
+          FOLDER_DATE=$(date +'%-d %B %Y')
+          
+          if ls 2_* 1> /dev/null 2>&1; then
+            echo "Archive found. Authenticating with MEGA..."
+            mega-login "$MEGA_EMAIL" "$MEGA_PASSWORD"
+            
+            echo "Creating daily folder inside /archives..."
+            mega-mkdir "/archives/wushanghq_$FOLDER_DATE" || true
+            
+            echo "Uploading files to /archives/dankrishu_$FOLDER_DATE/ ..."
+            mega-put 2_* "/archives/wushanghq_$FOLDER_DATE/"
+            
+            mega-logout
+            echo "Upload successfully completed!"
+          else
+            echo "No stream found."
+          fi
