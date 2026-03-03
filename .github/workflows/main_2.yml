@@ -10,41 +10,85 @@ jobs:
   archive-stream:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install Dependencies (yt-dlp, Deno, ffmpeg & MEGAcmd)
+      - name: Install Dependencies (yt-dlp, Deno, ffmpeg, MEGAcmd & WARP)
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip unzip curl ffmpeg
+          sudo apt-get install -y python3-pip unzip curl ffmpeg gnupg
           
-          # Install yt-dlp via pip for the latest version
+          # Install yt-dlp & Deno
           pip3 install -U yt-dlp
-          
-          # Install Deno (Required by yt-dlp for YouTube JS challenges)
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
           
-          # Install MEGAcmd for CLI uploads
+          # Install MEGAcmd
           wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb
           sudo apt install -y "$PWD/megacmd-xUbuntu_22.04_amd64.deb"
+
+          # Install Cloudflare WARP repository and client
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update && sudo apt-get install -y cloudflare-warp
 
       - name: Set up YouTube Cookies
         run: |
           echo "${{ secrets.YT_COOKIES }}" > cookies.txt
 
-      - name: Download Stream (with Auto-Timeout)
+      - name: Connect Cloudflare WARP Tunnel
         run: |
-          timeout --signal=SIGINT 340m yt-dlp \
-            --cookies cookies.txt \
-            --wait-for-video 60 \
-            --downloader m3u8:native \
-            -f "bestvideo+bestaudio/best" \
-            --write-thumbnail \
-            --embed-thumbnail \
-            --embed-metadata \
-            --force-ipv4 \
-            --remote-components ejs:github \
-            --extractor-args "youtube:player_client=tv,web" \
-            -o "2_%(title)s.%(ext)s" \
-            "$TARGET_URL" || true
+          echo "Registering anonymous WARP client..."
+          warp-cli --accept-tos registration new
+          warp-cli --accept-tos mode warp
+          echo "Connecting to WARP..."
+          warp-cli --accept-tos connect
+          
+          # Give it a few seconds to establish the WireGuard handshake
+          sleep 10
+          
+          # Verify the traffic is officially routing through Cloudflare
+          echo "Checking routing status:"
+          curl -s https://www.cloudflare.com/cdn-cgi/trace | grep warp
+
+      - name: Download Stream (WARP + Self-Healing Loop)
+        run: |
+          timeout --signal=SIGINT 340m bash -c '
+            while true; do
+              echo "▶️ Starting/Resuming yt-dlp download through WARP..."
+              yt-dlp \
+                --cookies cookies.txt \
+                --wait-for-video 60 \
+                --downloader m3u8:native \
+                -f "bestvideo+bestaudio/best" \
+                --retries infinite \
+                --fragment-retries infinite \
+                --retry-sleep "fragment:exp=1:20" \
+                --write-thumbnail \
+                --embed-thumbnail \
+                --embed-metadata \
+                --remote-components ejs:github \
+                --extractor-args "youtube:player_client=tv,web" \
+                -o "2_%(title)s_part_%(epoch)s.%(ext)s" \
+                "$TARGET_URL"
+              
+              EXIT_CODE=$?
+              
+              # Exit code 130 means the 340m hard timeout kicked in
+              if [ $EXIT_CODE -eq 130 ]; then
+                echo "🛑 Runner time limit reached. Gracefully exiting loop..."
+                break
+              fi
+              
+              echo "⚠️ yt-dlp stopped. Verifying if stream ended..."
+              sleep 15 # Wait a moment for YouTube to officially transition the stream
+              
+              # Silently check if the channel is still live
+              if yt-dlp --cookies cookies.txt --match-filter "is_live" --simulate "$TARGET_URL" > /dev/null 2>&1; then
+                echo "🔥 STREAM IS STILL LIVE! Reconnecting immediately to grab the next part..."
+              else
+                echo "✅ Stream is officially OFFLINE. Proceeding to upload..."
+                break
+              fi
+            done
+          ' || true
 
       - name: Upload to MEGA
         env:
