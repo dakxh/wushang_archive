@@ -23,7 +23,7 @@ jobs:
           # Install MEGAcmd
           wget https://mega.nz/linux/repo/xUbuntu_22.04/amd64/megacmd-xUbuntu_22.04_amd64.deb
           sudo apt install -y "$PWD/megacmd-xUbuntu_22.04_amd64.deb"
-
+          
           # Install Cloudflare WARP repository and client
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
@@ -50,44 +50,58 @@ jobs:
 
       - name: Download Stream (WARP + Self-Healing Loop)
         run: |
-          timeout --signal=SIGINT 340m bash -c '
-            while true; do
-              echo "▶️ Starting/Resuming yt-dlp download through WARP..."
-              yt-dlp \
-                --wait-for-video 60 \
-                --downloader m3u8:native \
-                -f "bestvideo+bestaudio/best" \
-                --retries infinite \
-                --fragment-retries infinite \
-                --retry-sleep "fragment:exp=1:20" \
-                --write-thumbnail \
-                --embed-thumbnail \
-                --embed-metadata \
-                --remote-components ejs:github \
-                --extractor-args "youtube:player_client=tv,web" \
-                -o "1_%(title)s_part_%(epoch)s.%(ext)s" \
-                "$TARGET_URL"
-              
-              EXIT_CODE=$?
-              
-              # Exit code 130 means the 340m hard timeout kicked in
-              if [ $EXIT_CODE -eq 130 ]; then
-                echo "🛑 Runner time limit reached. Gracefully exiting loop..."
-                break
-              fi
-              
-              echo "⚠️ yt-dlp stopped. Verifying if stream ended..."
-              sleep 15 # Wait a moment for YouTube to officially transition the stream
-              
-              # Silently check if the channel is still live
-              if yt-dlp --cookies cookies.txt --match-filter "is_live" --simulate "$TARGET_URL" > /dev/null 2>&1; then
-                echo "🔥 STREAM IS STILL LIVE! Reconnecting immediately to grab the next part..."
-              else
-                echo "✅ Stream is officially OFFLINE. Proceeding to upload..."
-                break
-              fi
-            done
-          ' || true
+          # Calculate timestamps for dynamic timeout
+          START_TIME=$(date +%s)
+          MAX_DURATION=$((340 * 60)) # 340 minutes in seconds
+          
+          while true; do
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
+            REMAINING=$((MAX_DURATION - ELAPSED))
+            
+            if [ $REMAINING -le 0 ]; then
+              echo "🛑 Global timeout reached. Exiting loop..."
+              break
+            fi
+            
+            echo "▶️ Starting/Resuming yt-dlp download through WARP (Time left: $((REMAINING / 60)) minutes)..."
+            
+            # Apply timeout DIRECTLY to yt-dlp
+            timeout --signal=SIGINT ${REMAINING}s yt-dlp \
+              --cookies cookies.txt \
+              --wait-for-video 60 \
+              --downloader m3u8:native \
+              -f "bestvideo+bestaudio/best" \
+              --retries infinite \
+              --fragment-retries infinite \
+              --retry-sleep "fragment:exp=1:20" \
+              --write-thumbnail \
+              --embed-thumbnail \
+              --embed-metadata \
+              --remote-components ejs:github \
+              --extractor-args "youtube:player_client=tv,web" \
+              -o "1_%(title)s_part_%(epoch)s.%(ext)s" \
+              "$TARGET_URL"
+            
+            EXIT_CODE=$?
+            
+            # timeout command automatically returns 124 when it stops a process
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "🛑 340-minute limit hit! yt-dlp gracefully stopped."
+              break
+            fi
+            
+            echo "⚠️ yt-dlp stopped. Verifying if stream ended..."
+            sleep 15 
+            
+            # Silently check if the channel is still live
+            if yt-dlp --cookies cookies.txt --match-filter "is_live" --simulate "$TARGET_URL" > /dev/null 2>&1; then
+              echo "🔥 STREAM IS STILL LIVE! Reconnecting immediately..."
+            else
+              echo "✅ Stream is officially OFFLINE. Proceeding to upload..."
+              break
+            fi
+          done
 
       - name: Upload to MEGA
         env:
@@ -104,7 +118,7 @@ jobs:
             echo "Creating daily folder inside /archives..."
             mega-mkdir "/archives/wushanghq_$FOLDER_DATE" || true
             
-            echo "Uploading files to /archives/dankrishu_$FOLDER_DATE/ ..."
+            echo "Uploading files to /archives/itzarugod_$FOLDER_DATE/ ..."
             mega-put 1_* "/archives/wushanghq_$FOLDER_DATE/"
             
             mega-logout
