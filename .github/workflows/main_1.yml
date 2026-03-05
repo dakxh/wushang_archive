@@ -10,6 +10,7 @@ env:
   STREAMER_NAME: "wushanghq"
   TARGET_URL: "https://www.youtube.com/@wushanghq/live"
   FILE_PREFIX: "1" # Use 2 for the second runner
+  DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
 # ==========================================
 
 jobs:
@@ -54,6 +55,37 @@ jobs:
           echo "Checking routing status:"
           curl -s https://www.cloudflare.com/cdn-cgi/trace | grep warp
 
+      - name: Setup Discord Webhook Script
+        run: |
+          # Creates an armored sub-script that yt-dlp will trigger when the stream goes live
+          cat << 'EOF' > send_webhook.sh
+          #!/bin/bash
+          
+          # Catch any unexpected fatal errors and force a successful exit to protect yt-dlp
+          trap 'exit 0' ERR
+          
+          VIDEO_ID=$1
+          
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            exit 0
+          fi
+          
+          # The Anti-Spam Check: Only ping Discord if we haven't seen this specific video ID yet
+          if [ ! -f "/tmp/webhook_sent_${VIDEO_ID}" ]; then
+              # --max-time 5 ensures it won't hang yt-dlp if Discord's servers are down
+              # || true ensures failures are completely ignored
+              curl -s --max-time 5 -H "Content-Type: application/json" \
+                   -d "{\"content\": \"🚨 **${STREAMER_NAME}** is LIVE!\nWatch here: https://youtube.com/watch?v=${VIDEO_ID}\", \"embeds\": [{\"image\": {\"url\": \"https://img.youtube.com/vi/${VIDEO_ID}/maxresdefault.jpg\"}}]}" \
+                   "$DISCORD_WEBHOOK" > /dev/null 2>&1 || true
+                   
+              touch "/tmp/webhook_sent_${VIDEO_ID}" || true
+          fi
+          
+          # Always return a 0 (success) to yt-dlp so the download proceeds flawlessly
+          exit 0
+          EOF
+          chmod +x send_webhook.sh
+
       - name: Download Stream (WARP + Self-Healing Loop)
         run: |
           # Calculate timestamps for dynamic timeout
@@ -75,7 +107,7 @@ jobs:
             # Disable GitHub's strict error failing so the 124 code doesn't crash the script
             set +e
             
-            # Apply timeout DIRECTLY to yt-dlp
+            # Apply timeout DIRECTLY to yt-dlp. Added --exec to trigger the webhook!
             timeout --signal=SIGINT ${REMAINING}s yt-dlp \
               --cookies cookies.txt \
               --wait-for-video 60 \
@@ -89,6 +121,7 @@ jobs:
               --embed-metadata \
               --remote-components ejs:github \
               --extractor-args "youtube:player_client=tv,web" \
+              --exec "before_dl: ./send_webhook.sh %(id)s" \
               -o "${STREAMER_NAME}_${FILE_PREFIX}_%(title)s_part_%(epoch)s.%(ext)s" \
               "$TARGET_URL"
             
