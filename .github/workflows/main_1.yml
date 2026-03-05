@@ -3,8 +3,14 @@ name: YT Stream to MEGA Archiver
 on:
   workflow_dispatch: # Pure manual trigger, no inputs needed
 
+# ==========================================
+# ⚙️ SCRIPT CONFIGURATION (EDIT THIS ONLY)
+# ==========================================
 env:
+  STREAMER_NAME: "wushanghq"
   TARGET_URL: "https://www.youtube.com/@wushanghq/live"
+  FILE_PREFIX: "1" # Use 2 for the second runner
+# ==========================================
 
 jobs:
   archive-stream:
@@ -66,6 +72,9 @@ jobs:
             
             echo "▶️ Starting/Resuming yt-dlp download through WARP (Time left: $((REMAINING / 60)) minutes)..."
             
+            # Disable GitHub's strict error failing so the 124 code doesn't crash the script
+            set +e
+            
             # Apply timeout DIRECTLY to yt-dlp
             timeout --signal=SIGINT ${REMAINING}s yt-dlp \
               --cookies cookies.txt \
@@ -80,12 +89,15 @@ jobs:
               --embed-metadata \
               --remote-components ejs:github \
               --extractor-args "youtube:player_client=tv,web" \
-              -o "1_%(title)s_part_%(epoch)s.%(ext)s" \
+              -o "${STREAMER_NAME}_${FILE_PREFIX}_%(title)s_part_%(epoch)s.%(ext)s" \
               "$TARGET_URL"
             
             EXIT_CODE=$?
             
-            # timeout command automatically returns 124 when it stops a process
+            # Re-enable GitHub's strict error failing
+            set -e
+            
+            # timeout command automatically returns 124 when it successfully stops a process
             if [ $EXIT_CODE -eq 124 ]; then
               echo "🛑 340-minute limit hit! yt-dlp gracefully stopped."
               break
@@ -108,18 +120,18 @@ jobs:
           MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
           MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
         run: |
-          # Generate today's date in readable format (e.g., 2 March 2026)
-          FOLDER_DATE=$(date +'%-d %B %Y')
+          # Forced to Indian Standard Time to prevent midnight folder misnaming
+          FOLDER_DATE=$(TZ='Asia/Kolkata' date +'%-d %B %Y')
           
-          if ls 1_* 1> /dev/null 2>&1; then
+          if ls ${STREAMER_NAME}_${FILE_PREFIX}_* 1> /dev/null 2>&1; then
             echo "Archive found. Authenticating with MEGA..."
             mega-login "$MEGA_EMAIL" "$MEGA_PASSWORD"
             
             echo "Creating daily folder inside /archives..."
-            mega-mkdir "/archives/wushanghq_$FOLDER_DATE" || true
+            mega-mkdir "/archives/${STREAMER_NAME}_$FOLDER_DATE" || true
             
-            echo "Uploading files to /archives/itzarugod_$FOLDER_DATE/ ..."
-            mega-put 1_* "/archives/wushanghq_$FOLDER_DATE/"
+            echo "Uploading files to /archives/${STREAMER_NAME}_$FOLDER_DATE/ ..."
+            mega-put ${STREAMER_NAME}_${FILE_PREFIX}_* "/archives/${STREAMER_NAME}_$FOLDER_DATE/"
             
             mega-logout
             echo "Upload successfully completed!"
