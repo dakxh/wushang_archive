@@ -148,26 +148,40 @@ jobs:
             fi
           done
 
-      - name: Upload to MEGA
+      - name: Sync Archive to Hugging Face Bucket
         env:
-          MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-          MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TARGET_BUCKET: ${{ secrets.HF_TARGET_BUCKET }}
         run: |
           # Forced to Indian Standard Time to prevent midnight folder misnaming
           FOLDER_DATE=$(TZ='Asia/Kolkata' date +'%-d %B %Y')
+          STAGING_DIR="hf_upload/archives/${STREAMER_NAME}_${FOLDER_DATE}"
           
           if ls ${STREAMER_NAME}_${FILE_PREFIX}_* 1> /dev/null 2>&1; then
-            echo "Archive found. Authenticating with MEGA..."
-            mega-login "$MEGA_EMAIL" "$MEGA_PASSWORD"
+            echo "Archive found. Preparing local staging directory..."
+            mkdir -p "$STAGING_DIR"
             
-            echo "Creating daily folder inside /archives..."
-            mega-mkdir "/archives/${STREAMER_NAME}_$FOLDER_DATE" || true
+            # Move all downloaded video parts into the staging folder
+            mv ${STREAMER_NAME}_${FILE_PREFIX}_* "$STAGING_DIR/"
             
-            echo "Uploading files to /archives/${STREAMER_NAME}_$FOLDER_DATE/ ..."
-            mega-put ${STREAMER_NAME}_${FILE_PREFIX}_* "/archives/${STREAMER_NAME}_$FOLDER_DATE/"
+            echo "Syncing to Hugging Face Storage Bucket..."
+            python3 -c "
+          import os
+          from huggingface_hub import login, sync_bucket
+          token = os.environ.get('HF_TOKEN')
+          bucket = os.environ.get('HF_TARGET_BUCKET')
+          
+          print('🚀 Authenticating Hugging Face SDK...')
+          login(token=token)
+          
+          print(f'⚡ Initiating ultra-fast Storage Bucket sync to {bucket}...')
+          sync_bucket('./hf_upload', f'hf://buckets/{bucket}')
+          "
             
-            mega-logout
-            echo "Upload successfully completed!"
+            echo "✅ Hugging Face Sync completed successfully!"
+            
+            echo "🧹 Cleaning up local staging files..."
+            rm -rf hf_upload
           else
             echo "No stream found."
           fi
