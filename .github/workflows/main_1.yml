@@ -22,8 +22,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-pip unzip curl ffmpeg gnupg
           
-          # Install yt-dlp & Deno
-          pip3 install -U yt-dlp
+          # Install yt-dlp, Deno & Hugging Face Hub
+          pip3 install -U yt-dlp huggingface_hub requests urllib3
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
           
@@ -153,35 +153,70 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_TARGET_BUCKET: ${{ secrets.HF_TARGET_BUCKET }}
         run: |
-          # Forced to Indian Standard Time to prevent midnight folder misnaming
+          # 1. FAIL-SAFE DEPENDENCY CHECK
+          # Force install the required modules RIGHT HERE so the step can never fail due to missing libraries.
+          pip3 install -U huggingface_hub requests urllib3 > /dev/null 2>&1 || true
+
+          # 2. DATE AND DIRECTORY SETUP
           FOLDER_DATE=$(TZ='Asia/Kolkata' date +'%-d %B %Y')
           STAGING_DIR="hf_upload/archives/${STREAMER_NAME}_${FOLDER_DATE}"
           
-          if ls ${STREAMER_NAME}_${FILE_PREFIX}_* 1> /dev/null 2>&1; then
-            echo "Archive found. Preparing local staging directory..."
+          # 3. SAFE FILE CHECK
+          # Temporarily disable strict error failing so 'ls' doesn't crash the runner if files are missing
+          set +e
+          ls ${STREAMER_NAME}_${FILE_PREFIX}_* 1> /dev/null 2>&1
+          FILES_EXIST=$?
+          set -e
+          
+          if [ $FILES_EXIST -eq 0 ]; then
+            echo "✅ Archive found. Preparing local staging directory..."
             mkdir -p "$STAGING_DIR"
-            
-            # Move all downloaded video parts into the staging folder
             mv ${STREAMER_NAME}_${FILE_PREFIX}_* "$STAGING_DIR/"
             
-            echo "Syncing to Hugging Face Storage Bucket..."
-            python3 -c "
+            # 4. ROBUST PYTHON UPLOAD SCRIPT
+            # Writing to a file prevents weird Bash quotation conflicts
+            cat << 'EOF' > upload_script.py
           import os
+          import time
+          import sys
           from huggingface_hub import login, sync_bucket
+          
           token = os.environ.get('HF_TOKEN')
           bucket = os.environ.get('HF_TARGET_BUCKET')
           
           print('🚀 Authenticating Hugging Face SDK...')
-          login(token=token)
+          try:
+              login(token=token)
+          except Exception as e:
+              print(f"🚨 CRITICAL ERROR: Authentication failed. Check HF_TOKEN. {e}")
+              sys.exit(1)
           
-          print(f'⚡ Initiating ultra-fast Storage Bucket sync to {bucket}...')
-          sync_bucket('./hf_upload', f'hf://buckets/{bucket}')
-          "
+          # 5. THE RETRY LOOP (Self-Healing Upload)
+          max_retries = 10  # Try up to 10 times if the network drops
+          retry_delay = 30  # Wait 30 seconds between attempts
+          
+          for attempt in range(1, max_retries + 1):
+              try:
+                  print(f'\n⚡ Initiating Bucket sync to {bucket} (Attempt {attempt}/{max_retries})...')
+                  # sync_bucket automatically resumes partial uploads!
+                  sync_bucket('./hf_upload', f'hf://buckets/{bucket}')
+                  print('\n✅ Hugging Face Sync completed successfully!')
+                  break # Exit the loop, we are done!
+              except Exception as e:
+                  print(f'\n❌ Sync failed due to network or API error: {e}')
+                  if attempt < max_retries:
+                      print(f'⏳ Waiting {retry_delay} seconds before retrying...')
+                      time.sleep(retry_delay)
+                  else:
+                      print('\n🚨 FATAL: All upload attempts failed after max retries.')
+                      sys.exit(1)
+          EOF
             
-            echo "✅ Hugging Face Sync completed successfully!"
+            # Execute the hardened script
+            python3 upload_script.py
             
             echo "🧹 Cleaning up local staging files..."
-            rm -rf hf_upload
+            rm -rf hf_upload upload_script.py || true
           else
-            echo "No stream found."
+            echo "🛑 No stream files found. Nothing to upload."
           fi
